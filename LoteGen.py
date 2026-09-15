@@ -82,6 +82,7 @@ def log_msg(mensagem):
 #                 FUNÇÕES DE LÓGICA E MEMÓRIA
 # =========================================================
 def carregar_configuracoes():
+    global lista_fontes
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r') as f:
@@ -98,6 +99,11 @@ def carregar_configuracoes():
                 entry_destino_g.insert(0, config.get("destino_g", ""))
                 entry_chave.insert(0, config.get("chave", "LOTE"))
                 entry_qtd.insert(0, config.get("qtd", ""))
+                
+                lista_fontes = config.get("lista_fontes", ["Padrão", "cdmnc.shx", "romans.shx", "isocp.shx", "txt.shx"])
+                if 'combo_fontes' in globals():
+                    combo_fontes.configure(values=lista_fontes)
+                var_fonte_selecionada.set(config.get("fonte_selecionada", "Padrão"))
         except Exception:
             restaurar_padroes()
     else:
@@ -113,6 +119,8 @@ def salvar_configuracoes():
         "chk_livre": var_livre.get(),
         "txt_livre": entry_livre.get(),
         "fonte": entry_fonte.get().strip(),
+        "lista_fontes": lista_fontes,
+        "fonte_selecionada": var_fonte_selecionada.get(),
         "origem_g": entry_origem_g.get().strip(),
         "destino_g": entry_destino_g.get().strip(),
         "chave": entry_chave.get().strip(),
@@ -133,6 +141,7 @@ def restaurar_padroes():
     entry_livre.delete(0, 'end')
     entry_fonte.delete(0, 'end')
     entry_fonte.insert(0, "5.0")
+    var_fonte_selecionada.set("Padrão")
     salvar_configuracoes()
 
 def regra_toggle_lote():
@@ -199,7 +208,8 @@ def executar_preparador():
     log_msg("-" * 40)
     log_msg(f"PREPARADOR: Processando {len(arquivos)} arquivos...")
     inicio = time.time()
-    sucesso, erro = 0, 0
+    
+    sucesso, erro, ignorado = 0, 0, 0
 
     for arquivo in arquivos:
         nome_arquivo = os.path.basename(arquivo)
@@ -215,16 +225,50 @@ def executar_preparador():
 
         if not texto_final.strip():
             log_msg(f"⚠️ IGNORADO: '{nome_arquivo}' (Texto vazio)")
-            erro += 1
+            ignorado += 1
             continue
             
         caminho_salvar = os.path.join(pasta_destino, nome_arquivo)
         
-        # Preparador agora salva diretamente (passa por cima sem perguntar)
         try:
             doc = ezdxf.readfile(arquivo)
             msp = doc.modelspace()
-            msp.add_text(texto_final, dxfattribs={'insert': (0, 0), 'height': tamanho_fonte})
+            
+            # --- LÓGICA DE FONTES COM VERIFICAÇÃO ANTI-COLISÃO ---
+            fonte_escolhida = var_fonte_selecionada.get()
+            estilo_final = None
+            
+            if fonte_escolhida != "Padrão":
+                for estilo in doc.styles:
+                    if hasattr(estilo.dxf, 'font') and estilo.dxf.font.lower() == fonte_escolhida.lower():
+                        estilo_final = estilo.dxf.name
+                        break
+                
+                if not estilo_final:
+                    nome_estilo = fonte_escolhida.split('.')[0].upper()
+                    
+                    if nome_estilo in doc.styles:
+                        estilo_existente = doc.styles.get(nome_estilo)
+                        if hasattr(estilo_existente.dxf, 'font') and estilo_existente.dxf.font.lower() != fonte_escolhida.lower():
+                            sufixo = 2
+                            while f"{nome_estilo}_{sufixo}" in doc.styles:
+                                sufixo += 1
+                            nome_estilo = f"{nome_estilo}_{sufixo}"
+                            doc.styles.new(nome_estilo, dxfattribs={"font": fonte_escolhida})
+                    else:
+                        doc.styles.new(nome_estilo, dxfattribs={"font": fonte_escolhida})
+                    
+                    estilo_final = nome_estilo
+
+                msp.add_text(texto_final, dxfattribs={
+                    'insert': (0, 0), 
+                    'height': tamanho_fonte, 
+                    'style': estilo_final
+                })
+            else:
+                msp.add_text(texto_final, dxfattribs={'insert': (0, 0), 'height': tamanho_fonte})
+            # --------------------------------------------------------
+
             doc.saveas(caminho_salvar)
             log_msg(f"✅ PREPARADO: {nome_arquivo}")
             sucesso += 1
@@ -234,8 +278,8 @@ def executar_preparador():
 
     tempo_gasto = time.time() - inicio
     log_msg(f"⏱️ Tempo total: {tempo_gasto:.2f} segundos")
-    log_msg(f"Concluído: {sucesso} prontos | {erro} erros.\n")
-    mostrar_popup("Processamento Concluído", f"✅ Preparados: {sucesso}\n❌ Erros: {erro}")
+    log_msg(f"Concluído: {sucesso} prontos | {ignorado} ignorados | {erro} erros.\n")
+    mostrar_popup("Processamento Concluído", f"✅ Preparados: {sucesso}\n⚠️ Ignorados: {ignorado}\n❌ Erros: {erro}")
 
 def executar_gerador():
     salvar_configuracoes()
@@ -263,9 +307,11 @@ def executar_gerador():
     
     qtd_lotes = int(qtd_str)
     sucesso, ignorado, erro, pulado = 0, 0, 0, 0
-    regex_padrao = re.compile(rf'({palavra_chave}[\s\-_]*\d+)', re.IGNORECASE)
     
-    # Flag para controlar a substituição em massa
+    # --- CORREÇÃO DO REGEX ---
+    regex_padrao = re.compile(rf'({re.escape(palavra_chave)}[\s\-_]*\d+)', re.IGNORECASE)
+    # -------------------------
+    
     substituir_todos = False
 
     for arquivo in arquivos:
@@ -296,7 +342,6 @@ def executar_gerador():
                             novo_nome = f"{nome_sem_ext}_LOTE_{novo_numero}.dxf"
                             caminho_salvar = os.path.join(pasta_destino, novo_nome)
                             
-                            # Lógica de substituição com "Sim para Todos"
                             if os.path.exists(caminho_salvar):
                                 if not substituir_todos:
                                     if not perguntar_substituicao(novo_nome):
@@ -335,7 +380,7 @@ def executar_gerador():
 # =========================================================
 root = ctk.CTk(fg_color=COR_FUNDO)
 root.title("LoteGen")
-root.geometry("650x640")
+root.geometry("650x690") 
 root.resizable(False, False)
 
 fonte_padrao = ctk.CTkFont(family="Segoe UI", size=13)
@@ -359,6 +404,8 @@ aba_gerador = tabview.add("Gerador")
 var_nome = ctk.BooleanVar()
 var_lote = ctk.BooleanVar()
 var_livre = ctk.BooleanVar()
+lista_fontes = ["Padrão", "cdmnc.shx", "romans.shx", "isocp.shx", "txt.shx"]
+var_fonte_selecionada = ctk.StringVar(value="Padrão")
 
 # ----------------- ABA 1: PREPARADOR -----------------
 ctk.CTkLabel(aba_preparador, text="Caminhos de Arquivo", font=fonte_titulo).pack(pady=(10, 5), padx=15, anchor="w")
@@ -401,6 +448,40 @@ linha_fonte.pack(fill="x", padx=15, pady=5)
 ctk.CTkLabel(linha_fonte, text="Tamanho Fonte:", font=fonte_padrao, width=145, anchor="w").pack(side="left")
 entry_fonte = ctk.CTkEntry(linha_fonte, height=35, width=80, fg_color=COR_CAMPO, border_width=0, corner_radius=RAIO_BORDA)
 entry_fonte.pack(side="left", padx=15)
+
+# --- BOTÕES PADRONIZADOS (CINZAS E COM BORDA REDONDA) ---
+linha_estilo = ctk.CTkFrame(aba_preparador, fg_color="transparent")
+linha_estilo.pack(fill="x", padx=15, pady=5)
+ctk.CTkLabel(linha_estilo, text="Estilo (Arquivo):", font=fonte_padrao, width=145, anchor="w").pack(side="left")
+
+combo_fontes = ctk.CTkComboBox(linha_estilo, values=lista_fontes, variable=var_fonte_selecionada, fg_color=COR_CAMPO, border_width=0, corner_radius=RAIO_BORDA, height=35, width=150, command=lambda e: salvar_configuracoes())
+combo_fontes.pack(side="left", padx=(15, 10))
+
+def adicionar_nova_fonte():
+    dialog = ctk.CTkInputDialog(text="Digite o nome da fonte (ex: Fusca_Azul.shx):", title="Adicionar Fonte")
+    nova_fonte = dialog.get_input()
+    if nova_fonte and nova_fonte.strip() != "":
+        nova_fonte = nova_fonte.strip()
+        if nova_fonte not in lista_fontes:
+            lista_fontes.append(nova_fonte)
+            combo_fontes.configure(values=lista_fontes)
+        var_fonte_selecionada.set(nova_fonte)
+        salvar_configuracoes()
+
+def remover_fonte():
+    fonte_atual = var_fonte_selecionada.get()
+    if fonte_atual != "Padrão" and fonte_atual in lista_fontes:
+        lista_fontes.remove(fonte_atual)
+        combo_fontes.configure(values=lista_fontes)
+        var_fonte_selecionada.set("Padrão")
+        salvar_configuracoes()
+
+btn_add_fonte = ctk.CTkButton(linha_estilo, text="+", width=35, height=35, fg_color=COR_CAMPO, hover_color="#2A2A2A", corner_radius=RAIO_BORDA, command=adicionar_nova_fonte)
+btn_add_fonte.pack(side="left")
+
+btn_remover_fonte = ctk.CTkButton(linha_estilo, text="-", width=35, height=35, fg_color=COR_CAMPO, hover_color="#2A2A2A", corner_radius=RAIO_BORDA, command=remover_fonte)
+btn_remover_fonte.pack(side="left", padx=(10, 0))
+# --------------------------------------------------------
 
 frame_acoes_p = ctk.CTkFrame(aba_preparador, fg_color="transparent")
 frame_acoes_p.pack(pady=15, padx=15, fill="x")
